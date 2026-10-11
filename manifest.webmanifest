@@ -1,0 +1,20 @@
+{
+  "name": "Chakra Sound Journey",
+  "short_name": "Chakra Journey",
+  "description": "A guided tone meditation through the seven chakras, with drones, singing-bowl tones and a breathing circle.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#110e19",
+  "theme_color": "#110e19",
+  "lang": "en",
+  "categories": ["health", "lifestyle", "music"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
