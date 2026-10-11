@@ -38,7 +38,6 @@
   --font-display: 'Marcellus', 'Palatino Linotype', Palatino, Georgia, serif;
   --font-body: 'Figtree', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
-  transition: --c 5s ease;
 }
 html { background: var(--bg); }
 body {
@@ -123,7 +122,7 @@ body {
 
 .progress { width: min(100%, 440px); display: grid; gap: 8px; }
 .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.bar > i { display: block; height: 100%; width: 0; background: var(--c); }
+.bar > i { display: block; height: 100%; width: 100%; background: var(--c); transform-origin: 0 50%; transform: scaleX(0); will-change: transform; }
 .times {
   display: flex; justify-content: space-between; gap: 10px;
   font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted);
@@ -326,7 +325,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
           <li>Sit or lie down comfortably. Close your eyes or rest your gaze on the circle.</li>
           <li>Breathe with the circle: in for four counts, out for six.</li>
           <li>Rest your attention on the part of the body where each center sits as its tone plays. You can repeat its seed sound silently.</li>
-          <li>Headphones give the fullest sound and turn on the headphone beat. On a phone, add it to your home screen from the browser menu to use it like an app, even offline.</li>
+          <li>Headphones give the fullest sound and turn on the headphone beat. On a phone, add it to your home screen from the browser menu to use it like an app, even offline. On iPhone, switch off silent mode.</li>
         </ul>
       </div>
     </aside>
@@ -433,7 +432,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
 
   function initAudio() {
     const AC = window.AudioContext || window.webkitAudioContext;
-    ctx = new AC();
+    // 'playback' asks for larger audio buffers: a little more latency, far fewer dropouts on phones
+    try { ctx = new AC({ latencyHint: 'playback' }); } catch (e) { ctx = new AC(); }
     master = ctx.createGain();
     master.gain.value = volGain(volume);
     const comp = ctx.createDynamicsCompressor();
@@ -441,7 +441,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
     master.connect(comp); comp.connect(ctx.destination);
 
     convolver = ctx.createConvolver();
-    convolver.buffer = makeImpulse(4.2, 2.6);
+    convolver.buffer = makeImpulse(3, 2.4);
     const rev = ctx.createGain(); rev.gain.value = 0.5;
     convolver.connect(rev); rev.connect(master);
 
@@ -473,20 +473,26 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
 
   function makePink(sec) {
     const len = Math.floor(ctx.sampleRate * sec);
-    const b = ctx.createBuffer(1, len, ctx.sampleRate);
-    const d = b.getChannelData(0);
+    const F = Math.floor(ctx.sampleRate * 0.5);   // crossfade length at the loop point
+    const raw = new Float32Array(len + F);
     let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-    for (let i = 0; i < len; i++) {
+    for (let i = 0; i < raw.length; i++) {
       const w = Math.random() * 2 - 1;
       b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759;
       b2 = 0.969 * b2 + w * 0.153852;   b3 = 0.8665 * b3 + w * 0.3104856;
       b4 = 0.55 * b4 + w * 0.5329522;   b5 = -0.7616 * b5 - w * 0.016898;
-      d[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
+      raw[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
       b6 = w * 0.115926;
     }
-    // smooth the loop seam
-    const f = Math.min(2000, len >> 2);
-    for (let i = 0; i < f; i++) { const k = i / f; d[i] *= k; d[len - 1 - i] *= k; }
+    // Seamless loop: blend the extra tail into the start with an equal-power crossfade,
+    // so the noise never dips in level where the loop wraps around.
+    const b = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = b.getChannelData(0);
+    d.set(raw.subarray(0, len));
+    for (let i = 0; i < F; i++) {
+      const t = (i + 0.5) / F;
+      d[i] = raw[i] * Math.sin(t * Math.PI / 2) + raw[len + i] * Math.cos(t * Math.PI / 2);
+    }
     return b;
   }
 
@@ -516,22 +522,30 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
     lfo.connect(lfoAmt); lfoAmt.connect(swell.gain);
     nodes.push(lfo);
 
-    const add = (freq, gain, detune, wave, pan) => {
+    // three shared stereo positions instead of one panner per oscillator
+    const sides = {};
+    const side = pos => {
+      if (sides[pos]) return sides[pos];
+      let dest = swell;
+      if (pos !== 'c' && ctx.createStereoPanner) {
+        const p = ctx.createStereoPanner(); p.pan.value = pos === 'l' ? -0.28 : 0.28; p.connect(swell); dest = p;
+      }
+      return (sides[pos] = dest);
+    };
+    const add = (freq, gain, detune, wave, pos) => {
       const o = ctx.createOscillator();
       if (wave) o.setPeriodicWave(wave); else o.type = 'sine';
       o.frequency.value = freq; o.detune.value = detune;
       const g = ctx.createGain(); g.gain.value = gain;
-      o.connect(g);
-      if (ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = pan; g.connect(p); p.connect(swell); }
-      else g.connect(swell);
+      o.connect(g); g.connect(side(pos));
       nodes.push(o);
     };
-    add(f / 4, 0.30, -4, warmWave, -0.3);
-    add(f / 4, 0.30, 4, warmWave, 0.3);
-    add(f / 2, 0.16, -3, null, 0.25);
-    add(f / 2, 0.16, 3, null, -0.25);
-    add(f, 0.06, 0, null, 0);
-    add(f * 1.5, 0.022, 2, null, 0);
+    add(f / 4, 0.30, -4, warmWave, 'l');
+    add(f / 4, 0.30, 4, warmWave, 'r');
+    add(f / 2, 0.16, -3, null, 'r');
+    add(f / 2, 0.16, 3, null, 'l');
+    add(f, 0.06, 0, null, 'c');
+    add(f * 1.5, 0.022, 2, null, 'c');
 
     // binaural layer: slightly different pitch in each ear
     const bL = ctx.createOscillator(), bR = ctx.createOscillator();
@@ -789,8 +803,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
   /* ---------- lotus orb ---------- */
   const cv = $('cv'), g = cv.getContext('2d');
   let dpr = 1;
+  const petalCache = new Map();
+  const CH_RGB = CH.map(c => hexToRgb(c.color));
   function resize() {
-    dpr = Math.min(2, window.devicePixelRatio || 1);
+    // the orb is soft and glowing, so 1.5x resolution looks the same as 3x and costs far less to paint
+    dpr = Math.min(1.5, window.devicePixelRatio || 1);
+    petalCache.clear();
     const r = cv.getBoundingClientRect();
     cv.width = Math.max(1, Math.round(r.width * dpr));
     cv.height = Math.max(1, Math.round(r.height * dpr));
@@ -808,24 +826,48 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
     return [{ n: p, d: 0.62, len: 1, off: p === 2 ? Math.PI / 2 : 0 }];
   }
 
-  function drawPetals(i, ring, cx, cy, rot, col, alpha) {
+  /* Each petal ring is drawn once into an offscreen canvas and then reused every frame,
+     just rotated and scaled, instead of redrawing up to 72 petals 60 times a second. */
+  function petalLayer(i, li, L, rgb) {
+    const key = i + '|' + li + '|' + cv.width;
+    let oc = petalCache.get(key);
+    if (oc) return oc;
+    const size = cv.width;
+    oc = document.createElement('canvas');
+    oc.width = oc.height = size;
+    const og = oc.getContext('2d');
+    const c = size / 2, ring = c * 0.72;
+    const rx = ring * Math.min(0.42, Math.max(0.06, 2.3 / L.n)), ry = ring * 0.34 * L.len;
+    const css = a => 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + a + ')';
+    og.lineWidth = 1.2 * dpr;
+    og.fillStyle = css(0.08);
+    og.strokeStyle = css(0.5);
+    for (let k = 0; k < L.n; k++) {
+      og.save();
+      og.translate(c, c);
+      og.rotate((k / L.n) * Math.PI * 2 + L.off);
+      og.beginPath();
+      og.ellipse(0, -ring * L.d, rx, ry, 0, 0, Math.PI * 2);
+      og.fill();
+      og.stroke();
+      og.restore();
+    }
+    petalCache.set(key, oc);
+    if (petalCache.size > 16) petalCache.delete(petalCache.keys().next().value);
+    return oc;
+  }
+
+  function drawPetals(i, s, cx, cy, rot, rgb, alpha) {
     if (alpha <= 0.01) return;
     petalLayers(i).forEach((L, li) => {
-      const rx = ring * Math.min(0.42, Math.max(0.06, 2.3 / L.n));
-      const ry = ring * 0.34 * L.len;
-      for (let k = 0; k < L.n; k++) {
-        const a = rot * (li % 2 ? -1 : 1) + (k / L.n) * Math.PI * 2 + L.off;
-        g.save();
-        g.translate(cx, cy);
-        g.rotate(a);
-        g.beginPath();
-        g.ellipse(0, -ring * L.d, rx, ry, 0, 0, Math.PI * 2);
-        g.fillStyle = col(0.08 * alpha);
-        g.fill();
-        g.strokeStyle = col(0.5 * alpha);
-        g.stroke();
-        g.restore();
-      }
+      const img = petalLayer(i, li, L, rgb);
+      g.save();
+      g.globalAlpha = alpha;
+      g.translate(cx, cy);
+      g.rotate(rot * (li % 2 ? -1 : 1));
+      g.scale(s, s);
+      g.drawImage(img, -img.width / 2, -img.height / 2);
+      g.restore();
     });
   }
 
@@ -846,10 +888,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
     g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.fill();
 
     const ring = R * 0.72 * s;
-    g.lineWidth = 1.2 * dpr;
+    // petals use each chakra's own colour, so the cached rings never need redrawing;
+    // the change between chakras is a crossfade of the two rings
     const m = ease(shapeMix);
-    if (prevShown !== selected) drawPetals(prevShown, ring, cx, cy, rot, col, 1 - m);
-    drawPetals(selected, ring, cx, cy, rot, col, prevShown !== selected ? m : 1);
+    if (prevShown !== selected) drawPetals(prevShown, s, cx, cy, rot, CH_RGB[prevShown], 1 - m);
+    drawPetals(selected, s, cx, cy, rot, CH_RGB[selected], prevShown !== selected ? m : 1);
 
     g.beginPath(); g.arc(cx, cy, ring * 0.4, 0, Math.PI * 2);
     g.fillStyle = col(0.2); g.fill();
@@ -860,8 +903,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
   }
 
   /* ---------- frame loop ---------- */
-  let lastTs = performance.now(), rot = 0;
+  let lastTs = performance.now(), rot = 0, lastDraw = -1e9, barFrac = -1;
+  function setBar(f) {
+    f = Math.round(Math.min(1, Math.max(0, f)) * 1000) / 1000;
+    if (f !== barFrac) { barFrac = f; E.bar.style.transform = 'scaleX(' + f + ')'; }
+  }
   function frame(ts) {
+    requestAnimationFrame(frame);
+    // about 30 frames a second is plenty for a slow breathing animation and leaves the phone free for sound
+    if (ts - lastDraw < 30) return;
+    lastDraw = ts;
     const dt = Math.min(0.1, Math.max(0, (ts - lastTs) / 1000));
     lastTs = ts;
     const k = 1 - Math.exp(-dt / 1.2);
@@ -876,18 +927,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
       breath = p < INHALE ? ease(p / INHALE) : 1 - ease((p - INHALE) / (BREATH - INHALE));
       if (state === 'done') {
         label = 'Complete';
-        E.bar.style.width = '100%';
+        setBar(1);
         setText(E.tEl, isFinite(segDur) ? fmt(segDur) : ''); setText(E.tLeft, '0:00'); setText(E.tTot, 'Session complete');
       } else {
         label = state === 'paused' ? 'Paused' : (p < INHALE ? 'Breathe in' : 'Breathe out');
         const elapsed = Math.max(0, now - segStart);
         if (isFinite(segDur)) {
           const segEl = Math.min(segDur, elapsed);
-          E.bar.style.width = (segEl / segDur * 100).toFixed(2) + '%';
+          setBar(segEl / segDur);
           setText(E.tEl, fmt(segEl));
           setText(E.tLeft, fmt(segDur - segEl));
         } else {
-          E.bar.style.width = '0%';
+          setBar(0);
           setText(E.tEl, fmt(elapsed));
           setText(E.tLeft, 'no limit');
         }
@@ -898,14 +949,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--fg); outlin
       const p = (ts / 1000) % BREATH;
       breath = 0.35 + 0.3 * (p < INHALE ? ease(p / INHALE) : 1 - ease((p - INHALE) / (BREATH - INHALE)));
       label = 'Ready';
-      E.bar.style.width = '0%';
+      setBar(0);
       setText(E.tEl, '0:00');
       setText(E.tLeft, fmt(JOURNEY_SEG));
       setText(E.tTot, selected === 0 ? 'Journey · 35:00' : 'From ' + CH[selected].en + ' · ' + fmt((CH.length - selected) * JOURNEY_SEG));
     }
     setText(E.breath, label);
     drawOrb(breath, rot);
-    requestAnimationFrame(frame);
   }
 
   setSelected(0);

@@ -1,5 +1,5 @@
 /* Chakra Sound Journey: keeps the app available offline after the first visit. */
-const CACHE = 'chakra-journey-v1';
+const CACHE = 'chakra-journey-v2';
 const FILES = [
   './',
   './index.html',
